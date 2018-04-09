@@ -10,6 +10,12 @@ import asyncio
 
 # Setup logger
 import functools
+from collections import namedtuple
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec, rsa, padding
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -153,11 +159,16 @@ SAMPLE_ENDPOINT = [
 
 SERVER_ADDRESS = ('0.tcp.ngrok.io', 15316)
 
+PROTOCOL_INFO = b'0'
+PROTOCOL_PUBLIC_KEY = b'1'
+PROTOCOL_DATA = b'2'
+PROTOCOL_DISCONNECT = b'3'
 
-def worker(loop):
+
+def worker(loop, results, request):
     asyncio.set_event_loop(loop)
 
-    client_factory = functools.partial(LambdaClient, data="data")
+    client_factory = functools.partial(LambdaClient, client_id="some-access-token", receiver_id="endpoint-001", results=results)
     factory_coroutine = loop.create_connection(client_factory, *SERVER_ADDRESS)
     loop.run_until_complete(factory_coroutine)
     loop.run_forever()
@@ -175,10 +186,6 @@ def lambda_handler(request, context):
     # loop.run_until_complete(coro)
     # loop.run_forever()
     # loop.close()
-    worker_loop = asyncio.new_event_loop()
-    t = threading.Thread(target=worker, args=(worker_loop,))
-    t.start()
-    t.join()
 
     logger.info("Directive:")
     logger.info(json.dumps(request, indent=4, sort_keys=True))
@@ -196,7 +203,14 @@ def lambda_handler(request, context):
         logger.error(error)
         raise
 
+    worker_loop = asyncio.new_event_loop()
+    results = [None]
+    t = threading.Thread(target=worker, args=(worker_loop, results, request))
+    t.start()
+    t.join()
+
     return response
+    # TODO return results[0]
 
 
 def get_uuid():
@@ -397,19 +411,84 @@ def get_directive_version(request):
             return "-1"
 
 
+Keys = namedtuple("Keys", "public_key, private_key, symmetric_key")
+
+
 class LambdaClient(asyncio.Protocol):
 
-    def __init__(self, data):
+    def __init__(self, client_id, receiver_id, results):
         super().__init__()
-        self.messages = data
+        self.client_id = client_id
+        self.receiver_id = receiver_id
+        self.results = results
+        self.transport = None
+
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048,
+            backend=default_backend()
+        )
+        public_key = private_key.public_key()
+
+        self.keys = Keys(public_key, private_key, None)
 
     def connection_made(self, transport):
         self.transport = transport
-        self.transport.write(b"Hello, I am Client")
+        self.transport.write(format_message(PROTOCOL_INFO, str.encode(self.__class__.__name__), str.encode(self.client_id)))
+        pem = self.keys.public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        logger.info("Public key:")
+        logger.info(pem)
+        self.transport.write(format_message(PROTOCOL_PUBLIC_KEY, pem, str.encode(self.receiver_id)))
 
     def data_received(self, data):
-        print('Server said: {}'.format(data.decode()))
-        asyncio.get_event_loop().stop()
+        logger.info(b'Received: ' + data)
+        if data.startswith(PROTOCOL_DATA):  # data encrypted with symmetric_key or self.keys.public_key
+            data = data.split(str.encode("."), 1)[1]
+            enc_data, sender_id = data.rsplit(str.encode("."), 1)
+            logger.info("Encrypted data:")
+            logger.info(enc_data)
+            if self.keys.symmetric_key is None:  # symmetric_key should be inside enc_data
+                symmetric_key = self.keys.private_key.decrypt(
+                    enc_data,
+                    padding.OAEP(
+                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                        algorithm=hashes.SHA256(),
+                        label=None
+                    )
+                )
+                logger.info("Symmetric key received:")
+                logger.info(symmetric_key)
+                self.keys = Keys(self.keys.public_key, self.keys.private_key, symmetric_key)
+
+                # SENDING DATA FOR TESTING
+                cipher_suite = Fernet(self.keys.symmetric_key)
+                token = cipher_suite.encrypt(b'some data to be encrypted...')
+                self.transport.write(format_message(PROTOCOL_DATA, token, str.encode(self.receiver_id)))
+
+                asyncio.get_event_loop().stop()  # TODO change this
+
+            else:
+                cipher_suite = Fernet(self.keys.symmetric_key)
+                data = cipher_suite.decrypt(enc_data)
+                logger.info("Decrypted data received:")
+                logger.info(data)
+                asyncio.get_event_loop().stop()  # TODO change this
+        else:
+            raise Exception("Unknown Message type: {data}".format(data=data.decode()))
+
+        # TODO asyncio.get_event_loop().stop()
 
     def connection_lost(self, exc):
+        logger.info(exc)
         asyncio.get_event_loop().stop()
+
+
+def format_message(protocol, data, id):
+    return str.encode("{protocol}.{data}.{id}".format(
+        protocol=protocol.decode(),
+        data=data.decode(),
+        id=id.decode()
+    ))
