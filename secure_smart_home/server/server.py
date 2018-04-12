@@ -78,8 +78,8 @@ class IoTProtocol(asyncio.Protocol):
         receiver.write(data)
 
     def connection_lost(self, exc):
-        self.log.debug("Connection lost")
-        if self.type == "IoTClient":
+        # self.log.debug("Connection lost")
+        if self.type == b"IoTClient":  # TODO WTF IS GOING ON HERE (KEYERROR)
             del self.factory.iot_clients[self.id]
         else:
             del self.factory.lambda_clients[self.id]
@@ -98,7 +98,6 @@ class IoTFactory:
 
     def build_protocol(self):
         return self.protocol(self)
-
 
 
 def main():

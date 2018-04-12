@@ -36,6 +36,14 @@ def format_message(protocol, data, id):
     ))
 
 
+def format_command_response(command, command_value, success):
+    return str.encode("{command}.{command_value}.{success}".format(
+        command=command,
+        command_value=command_value,
+        success=str(success)
+    ))
+
+
 class IoTClient(asyncio.Protocol):
 
     def __init__(self, endpoint_id):
@@ -76,9 +84,21 @@ class IoTClient(asyncio.Protocol):
 
         elif data.startswith(PROTOCOL_DATA):  # data encrypted with symmetric_key
             _, enc_data, sender_id = data.split(str.encode("."))
-            cipher_suite = Fernet(self.keys[sender_id].symmetric_key)
-            data = cipher_suite.decrypt(enc_data)
+            data = self.decrypt(enc_data, sender_id)
             self.log.debug('Received Data (Decrypted): {}, From: {}'.format(data.decode(), sender_id.decode()))
+
+            command, value = data.split(str.encode("."))
+            if command == b"powerState":
+
+                if value == b"ON":
+                    self.send_command_response(command, value, sender_id, self.execute_command(command, value))
+                elif value == b"OFF":
+                    self.send_command_response(command, value, sender_id, self.execute_command(command, value))
+                else:
+                    raise Exception("Invalid value: {} for command: ".format(value.decode(), command.decode()))
+            else:
+                raise Exception("Unknown Command: {}".format(command.decode()))
+
         elif data.startswith(PROTOCOL_DISCONNECT):
             _, lambda_id = data.split(str.encode("."))
             del self.keys[lambda_id]
@@ -88,9 +108,34 @@ class IoTClient(asyncio.Protocol):
 
     def connection_lost(self, exc):
         self.log.debug("Connection Lost.")
-        self.log.debug(exc)
+        self.log.debug(exc)  # TODO Debug this
         self.transport = None
         asyncio.get_event_loop().stop()
+
+    def send_command_response(self, command, value, receiver_id, success):
+        self.log.debug("Sending Response for: {} with value: {}".format(command.decode(), value.decode()))
+        data = format_command_response(command.decode(), value.decode(), success)
+        cipher_text = self.encrypt(data, receiver_id)
+        message = format_message(PROTOCOL_DATA, cipher_text, receiver_id)
+        self.transport.write(message)
+
+    def execute_command(self, command, value):
+        # TODO Actually execute command
+        return True
+
+    def encrypt(self, plain_text, receiver_id):
+        if self.keys[receiver_id].symmetric_key is None:
+            raise Exception("Symmetric Key not available.")
+        cipher_suite = Fernet(self.keys[receiver_id].symmetric_key)
+        token = cipher_suite.encrypt(plain_text)
+        return token
+
+    def decrypt(self, cipher_text, sender_id):
+        if self.keys[sender_id].symmetric_key is None:
+            raise Exception("Symmetric Key not available.")
+        cipher_suite = Fernet(self.keys[sender_id].symmetric_key)
+        plain_text = cipher_suite.decrypt(cipher_text)
+        return plain_text
 
 
 def main():
