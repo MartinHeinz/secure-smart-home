@@ -157,7 +157,7 @@ SAMPLE_ENDPOINT = [
     }
 ]
 
-SERVER_ADDRESS = ('0.tcp.ngrok.io', 17662)
+SERVER_ADDRESS = ('0.tcp.ngrok.io', 18987)
 
 PROTOCOL_INFO = b'0'
 PROTOCOL_PUBLIC_KEY = b'1'
@@ -425,7 +425,8 @@ class LambdaClient(asyncio.Protocol):
         payload = {
             "endpoints": endpoints
         }
-        return create_directive(header, payload)
+        self.results[0] = create_directive(header, payload)
+        asyncio.get_event_loop().stop()
 
     def handle_control(self):
         request_name = self.request["directive"]["header"]["name"]
@@ -437,11 +438,10 @@ class LambdaClient(asyncio.Protocol):
                 self.handle_control_turn_off()
         elif request_namespace == "Alexa.Authorization":
             if request_name == "AcceptGrant":
-                response = self.handle_control_accept_grant()
-                return response
+                self.handle_control_accept_grant()
         else:
-            handle_unsupported_operation(self.request)  # TODO
-            # logger.error(...)
+            self.handle_unsupported_operation()
+            logger.error("Unsupported Operation: cannot handle request.")
 
     def handle_control_turn_on(self):
         self.call_device_cloud("powerState", "ON")
@@ -530,29 +530,28 @@ class LambdaClient(asyncio.Protocol):
                 "payload": {}
             }
         }
-        return response
+        self.results[0] = response
 
-
-def handle_unsupported_operation(request):
-    response = {
-        "event": {
-            "header": {
-                "namespace": "Alexa",
-                "name": "ErrorResponse",
-                "messageId": get_uuid(),
-                "correlationToken": request["directive"]["header"]["correlationToken"],
-                "payloadVersion": "3"
-            },
-            "endpoint": {
-                "endpointId": request["directive"]["endpoint"]["endpointId"]
-            },
-            "payload": {
-                "type": "NOT_SUPPORTED_IN_CURRENT_MODE",
-                "message": ""
+    def handle_unsupported_operation(self):
+        response = {
+            "event": {
+                "header": {
+                    "namespace": "Alexa",
+                    "name": "ErrorResponse",
+                    "messageId": get_uuid(),
+                    "correlationToken": self.request["directive"]["header"]["correlationToken"],
+                    "payloadVersion": "3"
+                },
+                "endpoint": {
+                    "endpointId": self.request["directive"]["endpoint"]["endpointId"]
+                },
+                "payload": {
+                    "type": "NOT_SUPPORTED_IN_CURRENT_MODE",
+                    "message": ""
+                }
             }
         }
-    }
-    return response
+        self.results[0] = response
 
 
 def format_message(protocol, data, id):
